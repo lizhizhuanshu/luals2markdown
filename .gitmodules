@@ -1,0 +1,3 @@
+[submodule "luaparser"]
+	path = luaparser
+	url = https://github.com/LuaLS/LuaParser.git
