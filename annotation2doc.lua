@@ -32,10 +32,9 @@ end
 ---@field comment? string
 ---@field types FieldType[]
 
----@class FieldTable
----@field name? string
----@field comment? string
+---@class CustomType:FieldType
 ---@field fields Field[]
+---@field parents? string[]
 
 local function printT(t,indent,record)
   indent = indent or 0
@@ -108,14 +107,21 @@ decodeField = function (field)
   -- if not name then
   --   pringT(field)
   -- end
+  local rTypes
   local types = field.types
   if not types then
-    types = field.extends.types
+    if field.extends then
+      types = field.extends.types
+    end
   end
+  if types then
+    rTypes = decodeFieldTypes(types)
+  end
+
   return {
     name = name,
     comment = comment,
-    types = decodeFieldTypes(types)
+    types = rTypes
   }
 end
 
@@ -216,9 +222,9 @@ local function perfectLocalField(docs,localField)
       comments[#comments+1] = doc.comment.text
     elseif doc.type == "doc.type" then
       local types = decodeFieldTypes(doc.types)
-      for index, type in ipairs(types) do
-        appendType(localField.types,type)
-      end
+      localField.types = types
+    elseif doc.type == "doc.enum" then
+      localField.types = {{name=doc.enum[1]}}
     else
       -- error("unknown type:" .. doc.type)
     end
@@ -233,6 +239,7 @@ end
 local function decodeSetMethod(setMethod)
   local name = setMethod.method[1]
   local method = setMethod.value
+  print("set method",name)
   local args = decodeLocalFunctionArgs(method.args)
   local returns = {}
   local r = {
@@ -255,6 +262,9 @@ end
 ---@param source parser.object
 ---@param callback fun(field:parser.object)
 local function eachLocalTableAllSetMethod(source,callback)
+  if not source then
+    return
+  end
   local ref = source.ref
   if not ref then
     return
@@ -367,17 +377,30 @@ local function decodeTableFields(t)
 end
 
 ---@param clazz parser.object
+---@return CustomType
 local function decodeClass(clazz)
+  local fields
+  if clazz.bindSource then
+    fields = decodeTableFields(clazz.bindSource.value)
+  else
+    fields = {}
+  end
   local r = {
     name = clazz.class[1],
     comment = decodeComments(clazz.bindComments),
-    fields = decodeTableFields(clazz.bindSource.value)
+    fields = fields
   }
+  if clazz.extends then
+    local superClass = {}
+    for index, value in ipairs(clazz.extends) do
+      superClass[index] = value[1]
+    end
+    r.parents = superClass
+  end
   local fields = decodeFields(clazz.fields)
   for index, value in ipairs(fields) do
     r.fields[#r.fields+1] = value
   end
-  print(clazz.bindSource.type)
   decodeTableLocalField(clazz.bindSource,r.fields)
   return r
 end
@@ -419,10 +442,26 @@ local function decodeSetGolbal(setGlobal,index)
   return r
 end
 
+local function isClass(obj)
+  if not obj.bindDocs then
+    return false
+  end
+  for index, doc in ipairs(obj.bindDocs) do
+    if doc.type == "doc.class" then
+      return true
+    end
+  end
+  return false
+end
+
 local function isModule(ast)
   local size = #ast
   local obj = ast[size]
-  return obj.type == "return" and obj[1].node.ref[1].type == "getlocal"
+  if obj == nil then
+    return false
+  end
+  return obj.type == "return" and obj[1].node.type == "local"
+    and not isClass(obj[1].node)
 end
 
 local function decodeModule(ast)
@@ -547,11 +586,27 @@ end
 ---@type fun(funType:FieldType):string
 local generateSimFunTypeString
 
+local function isNativateType(name)
+  return name == "number" or 
+  name == "string" or 
+  name == "boolean" or 
+  name == "table" or 
+  name == "function" or
+  name == "integer" or
+  name == "nil" or
+  name == "any" or
+  name == "unknown"
+end
+
 local function generateSimTypeStr(fieldType)
   if fieldType.name == "function" then
     return generateSimFunTypeString(fieldType)
   else
-    return fieldType.name
+    local name = fieldType.name
+    if not name then
+      return ""
+    end
+    return isNativateType(name) and name or string.format("[%s](%s.md)",name,name)
   end
 end
 local function generateTypesString(types)
@@ -608,7 +663,7 @@ local function generateFunTypeString(funType,out)
 end
 
 
----@param aModule FieldTable
+---@param aModule CustomType
 local function generateModuleStr(aModule)
   local r = {}
   r[#r+1] = string.format("# %s 模块",aModule.name)
@@ -641,10 +696,21 @@ local function generateModuleStr(aModule)
   end
   return table.concat(r,"\r\n")
 end
-
+---@param parents string[]
+local function generateParentClassesStr(parents)
+  local r = {}
+  for index, name in ipairs(parents) do
+    r[index] = isNativateType(name) and name or string.format("[%s](%s.md)",name,name)
+  end
+  return table.concat(r,",")
+end
+---@param clazz CustomType
 local function generateClassStr(clazz)
   local r = {}
   r[#r+1] = string.format("# %s 类",clazz.name)
+  if clazz.parents then
+    r[#r+1] = string.format("## 继承 %s",generateParentClassesStr(clazz.parents))
+  end
   if clazz.comment then
     r[#r+1] = repairComment(clazz.comment)
   end
@@ -705,29 +771,24 @@ local function generateGlobalsStr(globals)
     if global.comment then
       r[#r+1] = repairComment(global.comment)
     end
-    r[#r+1] = "### 类型"
     if isAloneFun(global.types) then
       generateFunTypeString(global.types[1],r)
     else
-      r[#r+1] = generateTypesString(global.types)
+      r[#r+1] = string.format("类型 %s",generateTypesString(global.types))
     end
   end
   return table.concat(r,"\r\n")
 end
 
-local function save(path,data,add)
-  local mod = "wb"
-  if add then
-    mod = "ab"
-  end
-  local f = io.open(path,mod)
-  assert(f)
+local function save(path,data)
+  local f = io.open(path,"wb")
+  assert(f,"can't open file:" .. path)
   f:write(data)
   f:close()
 end
 
 
----@param classes FieldTable[]
+---@param classes CustomType[]
 local function writeClassesTo(dir,classes)
   for index, value in ipairs(classes) do
     local data = generateClassStr(value)
@@ -749,9 +810,18 @@ local function writeEnumsTo(dir,enums)
   end
 end
 
-local function writeGlobalsTo(path,cache,add)
-  local data = generateGlobalsStr(cache.globals)
-  save(path,data,add)
+local function readData(path)
+  local file = io.open(path,"rb")
+  if file then
+    local data = file:read("*a")
+    file:close()
+    return data
+  end
+end
+
+local function writeGlobalsTo(path,cache)
+  local data = generateGlobalsStr(cache)
+  save(path,data)
 end
 
 local function writeCommonTo(dir,cache)
@@ -765,6 +835,7 @@ end
 return {
   VERSION = "0.0.1",
   pathJon = pathJoin,
+  printT = printT,
   decodeCommonFromFile = decodeCommonFromFile,
   writeClassesTo = writeClassesTo,
   writeModulesTo = writeModuleTo,

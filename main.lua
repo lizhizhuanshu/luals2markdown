@@ -34,47 +34,74 @@ local function isdir(path)
   return attr and attr.mode == "directory"
 end
 
-if not isdir(args.out) then
-  print("Error: output must be a directory.")
-  os.exit(1)
+local function createDirectories(path)
+  local dirs = {}
+  local path_separator = package.config:sub(1,1)
+
+  for dir in string.gmatch(path, "([^"..path_separator.. "]+)") do
+    dirs[#dirs+1] = dir
+  end
+  local current = ""
+  for i, dir in ipairs(dirs) do
+    current = current .. dir
+    if not isdir(current) then
+      lfs.mkdir(current)
+    end
+    current = current .. path_separator
+  end
 end
 
-local function saveDoc(input,out)
-  local cache = a2d.decodeCommonFromFile(input)
+if not isdir(args.out) then
+  createDirectories(args.out)
+end
+
+local function saveDoc(cache,out)
   if args.all or  args.class and cache.classes then
     a2d.writeClassesTo(out,cache.classes)
   end
   if args.all or args.enum and cache.enums then
     a2d.writeEnumsTo(out,cache.enums)
   end
-  if args.all or args.global and cache.globals then
-    local path = a2d.pathJon(out,"globals.md")
-    a2d.writeGlobalsTo(path,cache.globals,true)
-    local file = io.open(path,"ab")
-    assert(file)
-    file:write("\r\n")
-    file:close()
-  end
-  if args.all or args.module and cache.globals then
+  if args.all or args.module and cache.modules then
     a2d.writeModulesTo(out,cache.modules)
   end
 end
 
-if isdir(args.input) then
-  for file in lfs.dir(args.input) do
+local function saveGlobal(globals,out)
+  if not globals or #globals ==0 then
+    return
+  end
+  a2d.writeGlobalsTo(a2d.pathJon(out,"globals.md"),globals)
+end
+
+local function transformDir(dir,out,globals)
+  globals = globals or {}
+  for file in lfs.dir(dir) do
     if file ~= "." and file ~= ".." then
-      local path = a2d.pathJon(args.input,file)
+      local path = a2d.pathJon(dir,file)
       if isdir(path) then
-        local out = a2d.pathJon(args.out,file)
-        lfs.mkdir(out)
-        saveDoc(path,out)
+        transformDir(path,out,globals)
       elseif string.find(path,"%.lua$") then
-        local out = a2d.pathJon(args.out,file)
-        saveDoc(path,out)
+        print("start transform ",path)
+        local cache = a2d.decodeCommonFromFile(path)
+        saveDoc(cache,out)
+        for index, value in ipairs(cache.globals) do
+          globals[#globals+1] = value
+        end
       end
     end
   end
+end
+
+
+
+if isdir(args.input) then
+  local globals = {}
+  transformDir(args.input,args.out,globals)
+  saveGlobal(globals,args.out)
 else
-  saveDoc(args.input,args.out)
+  local cache = a2d.decodeCommonFromFile(args.input)
+  saveDoc(cache,args.out)
+  saveGlobal(cache.globals,args.out)
 end
 
